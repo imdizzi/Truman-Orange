@@ -1,0 +1,94 @@
+import random
+import numpy as np
+from qgis.core import (
+    QgsProject,
+    QgsFeature,
+    QgsGeometry,
+    QgsPointXY,
+    QgsVectorLayer,
+    QgsDistanceArea,
+    QgsField,
+    QgsWkbTypes,
+    QgsSimpleFillSymbolLayer
+)
+from PyQt5.QtCore import QVariant
+from PyQt5.QtGui import QColor
+
+# Naming both layers by using the original layer name
+Customers_Layer = "Customer location"
+Border_line_layer = "nga_admbnda_adm0_osgof_20190417"
+
+# Scanning layers for matching name and assigning it to a variable
+layer1 = QgsProject.instance().mapLayersByName(Customers_Layer)
+layer2 = QgsProject.instance().mapLayersByName(Border_line_layer)
+
+layer1 = layer1[0]  # First matching layer for customers
+layer2 = layer2[0]  # First matching layer for the boundary
+
+# Parameters
+circle_radius = 0.2  # Radius in meters (10 km)
+
+# Get the geometry of the boundary from the border (Layer2)
+boundary_geom = QgsGeometry.unaryUnion([feature.geometry() for feature in layer2.getFeatures()])
+
+# Initialize variables
+max_customers = 0
+best_point = None
+
+def count_customers_within_circle(center, radius, customers):
+    """Count customers within a circle defined by center and radius."""
+    count = 0
+    for customer in customers:
+        customer_point = customer.geometry().asPoint()
+        if QgsDistanceArea().measureLine(center, customer_point) <= radius:
+            count += 1
+    return count
+
+# Retrieve all customer points from layer1
+customer_features = [feature for feature in layer1.getFeatures()]
+
+# Retrieve boundary geometry points 
+boundary_points = []
+for feature in layer2.getFeatures():
+    geom = feature.geometry()
+    if geom.type() == QgsWkbTypes.PolygonGeometry:
+        boundary_points.append(geom.centroid().asPoint())
+    elif geom.type() == QgsWkbTypes.LineGeometry:
+        boundary_points.extend([QgsPointXY(p) for p in geom.vertices()])
+
+# Find the best circle to maximize customers
+for point in boundary_points:
+    customers_in_circle = count_customers_within_circle(point, circle_radius, customer_features)
+    if customers_in_circle > max_customers:
+        max_customers = customers_in_circle
+        best_point = point
+
+print(f"Best point: {best_point}, covering {max_customers} customers")
+
+# Add the circle as a new layer
+circle_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "Best Circle", "memory")
+circle_layer.dataProvider().addAttributes([QgsField("Customers", QVariant.Int)])
+circle_layer.updateFields()
+
+if best_point:
+    # Create the circle geometry
+    circle_geom = QgsGeometry.fromPointXY(best_point).buffer(circle_radius, 50)  # 50 segments for smoothness
+
+    # Create a new feature
+    feature = QgsFeature()
+    feature.setGeometry(circle_geom)
+    feature.setAttributes([max_customers])
+
+    # Add the feature to the layer
+    circle_layer.dataProvider().addFeature(feature)
+
+    # Style the layer with 50% opacity
+    renderer = circle_layer.renderer()
+    symbol = renderer.symbol()
+    symbol_layer = QgsSimpleFillSymbolLayer()
+    symbol_layer.setColor(QColor(255, 0, 0, 127))  # Red color with 50% opacity (127/255)
+    symbol.changeSymbolLayer(0, symbol_layer)
+    circle_layer.triggerRepaint()
+
+    # Add the layer to the project
+    QgsProject.instance().addMapLayer(circle_layer)
